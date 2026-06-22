@@ -64,63 +64,68 @@ def split_teams(members, max_per_team=4):
 
 class MoveButton(discord.ui.View):
     """
-    '음성 채널로 이동' 버튼이 달린 View.
-    버튼을 누르면 각 팀원을 미리 만들어둔 '팀N' 음성 채널로 이동시킨다.
+    '내 팀으로 이동' 버튼이 달린 View.
+    각 개인이 버튼을 누르면, 본인이 속한 팀의 음성 채널로 본인만 이동한다.
     """
 
     def __init__(self, teams, guild):
-        super().__init__(timeout=300)  # 5분 후 버튼 비활성화
+        super().__init__(timeout=600)  # 10분 후 버튼 비활성화
         self.teams = teams
         self.guild = guild
+        # 빠른 조회를 위해 {유저ID: 팀번호(0부터)} 형태로 미리 만들어 둔다.
+        self.member_team = {}
+        for i, team in enumerate(self.teams):
+            for member in team:
+                self.member_team[member.id] = i
 
-    @discord.ui.button(label="음성 채널로 이동", style=discord.ButtonStyle.primary, emoji="🔀")
+    @discord.ui.button(label="내 팀으로 이동", style=discord.ButtonStyle.primary, emoji="🔀")
     async def move(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 권한 체크: 멤버 이동 권한이 있는 사람만 누를 수 있게
-        if not interaction.user.guild_permissions.move_members:
+        user = interaction.user
+
+        # 1) 버튼 누른 사람이 이번 팀 나누기 대상인지 확인
+        if user.id not in self.member_team:
             await interaction.response.send_message(
-                "❌ 멤버 이동 권한이 있는 사람만 이 버튼을 사용할 수 있어요.",
+                "❌ 이번 팀 나누기에 포함되지 않은 사람이에요.", ephemeral=True
+            )
+            return
+
+        # 2) 본인이 현재 음성 채널에 있는지 확인 (없으면 이동 불가)
+        if not user.voice or not user.voice.channel:
+            await interaction.response.send_message(
+                "❌ 먼저 음성 채널에 들어가 있어야 이동할 수 있어요.", ephemeral=True
+            )
+            return
+
+        # 3) 본인 팀 번호 -> 채널 이름 찾기
+        team_index = self.member_team[user.id]
+        if team_index >= len(TEAM_CHANNEL_NAMES):
+            await interaction.response.send_message(
+                "❌ 이동할 팀 채널 이름이 설정돼 있지 않아요. (관리자에게 문의)",
                 ephemeral=True,
             )
             return
 
-        moved = 0
-        not_found_channels = []
-
-        for i, team in enumerate(self.teams):
-            # 미리 정해둔 채널 이름 리스트에서 i번째 이름을 가져온다.
-            if i < len(TEAM_CHANNEL_NAMES):
-                channel_name = TEAM_CHANNEL_NAMES[i]
-            else:
-                # 팀 수가 정해둔 채널 이름보다 많은 경우
-                not_found_channels.append(f"(팀{i + 1}용 채널 이름이 부족함)")
-                continue
-
-            # 서버에서 해당 이름의 음성 채널을 찾는다.
-            target = discord.utils.get(
-                self.guild.voice_channels, name=channel_name
+        channel_name = TEAM_CHANNEL_NAMES[team_index]
+        target = discord.utils.get(self.guild.voice_channels, name=channel_name)
+        if target is None:
+            await interaction.response.send_message(
+                f"❌ **{channel_name}** 음성 채널을 찾지 못했어요.\n"
+                f"서버에 해당 이름의 음성 채널이 있는지 확인해 주세요.",
+                ephemeral=True,
             )
-            if target is None:
-                not_found_channels.append(channel_name)
-                continue
+            return
 
-            for member in team:
-                # 멤버가 아직 음성 채널에 있을 때만 이동 가능
-                if member.voice and member.voice.channel:
-                    try:
-                        await member.move_to(target)
-                        moved += 1
-                    except discord.HTTPException:
-                        pass
-
-        msg = f"✅ {moved}명을 각 팀 음성 채널로 이동시켰어요."
-        if not_found_channels:
-            missing = ", ".join(not_found_channels)
-            msg += (
-                f"\n⚠️ 다음 음성 채널을 찾지 못했어요: **{missing}**\n"
-                f"서버에 해당 이름의 음성 채널을 미리 만들어 주세요."
+        # 4) 본인만 이동
+        try:
+            await user.move_to(target)
+            await interaction.response.send_message(
+                f"✅ **{channel_name}** 채널로 이동했어요!", ephemeral=True
             )
-
-        await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                "❌ 이동에 실패했어요. 봇 권한(멤버 이동)을 확인해 주세요.",
+                ephemeral=True,
+            )
 
 
 @client.event
@@ -168,6 +173,8 @@ async def divide_teams(interaction: discord.Interaction, 최대인원: int = 4):
         else:
             channel_label = f"(채널 부족)"
         lines.append(f"**{channel_label}** ({len(team)}명): {names}")
+
+    lines.append("\n👇 아래 버튼을 누르면 **본인 팀 채널로 이동**합니다. (각자 눌러주세요)")
 
     result_text = "\n".join(lines)
 
